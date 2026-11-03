@@ -1,17 +1,19 @@
 import * as util from '../core/util';
-import {devicePixelRatio} from '../config';
 import { ImagePatternObject } from '../graphic/Pattern';
 import CanvasPainter from './Painter';
 import { GradientObject, InnerGradientObject } from '../graphic/Gradient';
-import { ZRCanvasRenderingContext } from '../core/types';
+import {
+    INCREMENTAL_ID_FALSE, IncrementalId, ZLevel, ZLevel2, ZLEVEL2_NORMAL_BELOW
+} from '../core/types';
 import Eventful from '../core/Eventful';
-import { ElementEventCallback } from '../Element';
+import Element, { ElementEventCallback } from '../Element';
 import { getCanvasGradient } from './helper';
 import { createCanvasPattern } from './graphic';
 import Displayable from '../graphic/Displayable';
 import BoundingRect from '../core/BoundingRect';
 import { REDRAW_BIT } from '../graphic/constants';
 import { platformApi } from '../core/platform';
+import { getDevicePixelRatio } from '../config';
 
 function createDom(id: string, painter: CanvasPainter, dpr: number) {
     const newDom = platformApi.createCanvas();
@@ -29,10 +31,27 @@ function createDom(id: string, painter: CanvasPainter, dpr: number) {
         newDom.setAttribute('data-zr-dom-id', id);
     }
 
-    newDom.width = width * dpr;
-    newDom.height = height * dpr;
+    updateDomByDPR(newDom, width, height, dpr);
 
     return newDom;
+}
+
+function updateDomByDPR(dom: HTMLCanvasElement, width: number, height: number, dpr: number): void {
+    dom.width = width * dpr;
+    dom.height = height * dpr;
+}
+
+export function isIncrementalLayer(layer: Layer): boolean {
+    return !layer.__cursors.get(INCREMENTAL_ID_FALSE);
+}
+
+function getStartEndFromCursor(layer: Layer): LayerDrawCursorStartEnd {
+    // this.__cursors.get(INCREMENTAL_ID_FALSE) is absent if incremental.
+    const cursor = layer.__cursors.get(INCREMENTAL_ID_FALSE);
+    return {
+        startIdx: cursor ? cursor.startIdx : 0,
+        endIdx: cursor ? cursor.endIdx : 0,
+    };
 }
 
 export interface LayerConfig {
@@ -43,6 +62,34 @@ export interface LayerConfig {
     // 在开启动态模糊的时候使用，与上一帧混合的alpha值，值越大尾迹越明显
     lastFrameAlpha?: number
 };
+
+export interface LayerDrawCursor {
+    key: IncrementalId
+    // Mark using for one run of `Painter['refresh']`
+    used: boolean
+    // The next index (of `displayList`) to be drawn.
+    // CANVAS_INCREMENTAL_CASE_MULTIPLE_ELEMENTS is implemented by this pointer.
+    drawIdx: number
+    // The first `notClear` el in this cursor to be drawn.
+    // If `-1`, no `notClear` el need to be drawn in this cursor in this pass.
+    // CANVAS_INCREMENTAL_CASE_SINGLE_ELEMENT is implemented by this pointer.
+    notClearIdx: number
+    startIdx: number
+    // The max index + 1 (of `displayList`) can be drawn.
+    endIdx: number
+    endIdxNew: number
+    // Element ids on this layer in the last pass.
+    // For incremental layer, only save the `els[0]`.
+    // ids: Element['id'][]
+    // idsLen: number
+    // The first element id corresponding to `startIdx`.
+    first: Element['id']
+    // The end element id corresponding to `endIdx`.
+    last: Element['id']
+}
+
+type LayerDrawCursorStartEnd = Pick<LayerDrawCursor, 'startIdx' | 'endIdx'>;
+
 
 export default class Layer extends Eventful {
 
@@ -76,33 +123,35 @@ export default class Layer extends Eventful {
 
     /**
      * Virtual layer will not be inserted into dom.
+     * It may be set outside zrender, e.g., by echarts-gl.
      */
     virtual = false
 
     config = {}
 
-    incremental = false
-
-    zlevel = 0
+    zlevel: ZLevel = 0
+    zlevel2: ZLevel2 = ZLEVEL2_NORMAL_BELOW
 
     maxRepaintRectCount = 5
 
     private _paintRects: BoundingRect[]
 
-    __painter: CanvasPainter
-
+    // `__dirty` means need clear the canvas.
     __dirty = true
+
     __firstTimePaint = true
 
-    __used = false
-
-    __drawIndex = 0
-    __startIndex = 0
-    __endIndex = 0
+    // `__cursorStack` represents existing draw cursors and the draw order.
+    // Each item is a key of `__cursors`.
+    // For non-incremental layer, only `0` is included.
+    // For incremental layer, do `0` is not included.
+    __cursorStack: IncrementalId[]
+    // Do not iterate `__cursors`; iterate `__cursorStack` instead.
+    __cursors: util.HashMap<LayerDrawCursor, IncrementalId>
 
     // indices in the previous frame
-    __prevStartIndex: number = null
-    __prevEndIndex: number = null
+    // Used on dirty rect rebuild.
+    __prevIdx: LayerDrawCursorStartEnd = {startIdx: 0, endIdx: 0}
 
     __builtin__: boolean
 
@@ -110,7 +159,7 @@ export default class Layer extends Eventful {
         super();
 
         let dom;
-        dpr = dpr || devicePixelRatio;
+        dpr = dpr || getDevicePixelRatio();
         if (typeof id === 'string') {
             dom = createDom(id, painter, dpr);
         }
@@ -136,18 +185,12 @@ export default class Layer extends Eventful {
         this.dpr = dpr;
     }
 
-    getElementCount() {
-        return this.__endIndex - this.__startIndex;
-    }
-
     afterBrush() {
-        this.__prevStartIndex = this.__startIndex;
-        this.__prevEndIndex = this.__endIndex;
+        this.__prevIdx = getStartEndFromCursor(this);
     }
 
     initContext() {
         this.ctx = this.dom.getContext('2d');
-        (this.ctx as ZRCanvasRenderingContext).dpr = this.dpr;
     }
 
     setUnpainted() {
@@ -251,7 +294,8 @@ export default class Layer extends Eventful {
          * Loop the paint list of this frame and get the dirty rects of elements
          * in this frame.
          */
-        for (let i = this.__startIndex; i < this.__endIndex; ++i) {
+        const se = getStartEndFromCursor(this);
+        for (let i = se.startIdx; i < se.endIdx; ++i) {
             const el = displayList[i];
             if (el) {
                 /**
@@ -296,7 +340,8 @@ export default class Layer extends Eventful {
          * paint list this frame, which does not include those elements removed
          * in this frame. So we loop the `prevList` to get the removed elements.
          */
-        for (let i = this.__prevStartIndex; i < this.__prevEndIndex; ++i) {
+        const prevIdx = this.__prevIdx;
+        for (let i = prevIdx.startIdx; i < prevIdx.endIdx; ++i) {
             const el = prevList[i];
             /**
              * Consider the elements whose ancestors are invisible, they should
@@ -311,7 +356,7 @@ export default class Layer extends Eventful {
              * rect if and only if it's not painted this frame and was
              * previously painted on the canvas.
              */
-            const shouldPaint = el.shouldBePainted(viewWidth, viewHeight, true, true);
+            const shouldPaint = el && el.shouldBePainted(viewWidth, viewHeight, true, true);
             if (el && (!shouldPaint || !el.__zr) && el.__isRendered) {
                 // el was removed
                 const prevRect = el.getPrevPaintRect();
@@ -356,8 +401,13 @@ export default class Layer extends Eventful {
         return (this._paintRects || []).slice();
     }
 
-    resize(width: number, height: number) {
-        const dpr = this.dpr;
+    resize(width: number, height: number, dpr?: number) {
+
+        if (dpr != null) {
+            this.dpr = dpr;
+        }
+
+        dpr = this.dpr;
 
         const dom = this.dom;
         const domStyle = dom.style;
@@ -368,12 +418,10 @@ export default class Layer extends Eventful {
             domStyle.height = height + 'px';
         }
 
-        dom.width = width * dpr;
-        dom.height = height * dpr;
+        updateDomByDPR(dom, width, height, dpr);
 
         if (domBack) {
-            domBack.width = width * dpr;
-            domBack.height = height * dpr;
+            updateDomByDPR(domBack, width, height, dpr);
 
             if (dpr !== 1) {
                 this.ctxBack.scale(dpr, dpr);
@@ -422,8 +470,14 @@ export default class Layer extends Eventful {
                 let clearColorGradientOrPattern;
                 // Gradient
                 if (util.isGradientObject(clearColor)) {
+                    // shouldn't cache when clearColor is not global and size changed
+                    const shouldCache = clearColor.global || (
+                        (clearColor as InnerGradientObject).__width === width
+                        && (clearColor as InnerGradientObject).__height === height
+                    );
                     // Cache canvas gradient
-                    clearColorGradientOrPattern = (clearColor as InnerGradientObject).__canvasGradient
+                    clearColorGradientOrPattern = shouldCache
+                        && (clearColor as InnerGradientObject).__canvasGradient
                         || getCanvasGradient(ctx, clearColor, {
                             x: 0,
                             y: 0,
@@ -432,15 +486,19 @@ export default class Layer extends Eventful {
                         });
 
                     (clearColor as InnerGradientObject).__canvasGradient = clearColorGradientOrPattern;
+                    (clearColor as InnerGradientObject).__width = width;
+                    (clearColor as InnerGradientObject).__height = height;
                 }
                 // Pattern
                 else if (util.isImagePatternObject(clearColor)) {
+                    // scale pattern by dpr
+                    clearColor.scaleX = clearColor.scaleX || dpr;
+                    clearColor.scaleY = clearColor.scaleY || dpr;
                     clearColorGradientOrPattern = createCanvasPattern(
                         ctx, clearColor, {
                             dirty() {
-                                // TODO
                                 self.setUnpainted();
-                                self.__painter.refresh();
+                                self.painter.refresh();
                             }
                         }
                     );
@@ -476,7 +534,7 @@ export default class Layer extends Eventful {
         }
     }
 
-    // Iterface of refresh
+    // Interface of refresh
     refresh: (clearColor?: string | GradientObject | ImagePatternObject) => void
 
     // Interface of renderToCanvas in getRenderedCanvas

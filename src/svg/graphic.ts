@@ -26,7 +26,7 @@ import { getLineHeight } from '../contain/text';
 import TSpan, { TSpanStyleProps } from '../graphic/TSpan';
 import SVGPathRebuilder from './SVGPathRebuilder';
 import mapStyleToAttrs from './mapStyleToAttrs';
-import { SVGVNodeAttrs, createVNode, SVGVNode, vNodeToString, BrushScope } from './core';
+import { SVGVNodeAttrs, createVNode, SVGVNode, vNodeToString, BrushScope, META_DATA_PREFIX } from './core';
 import { MatrixArray } from '../core/matrix';
 import Displayable from '../graphic/Displayable';
 import { assert, clone, isFunction, isString, logError, map, retrieve2 } from '../core/util';
@@ -39,6 +39,8 @@ import { ImageLike } from '../core/types';
 import { createCSSAnimation } from './cssAnimation';
 import { hasSeparateFont, parseFontSize } from '../graphic/Text';
 import { DEFAULT_FONT, DEFAULT_FONT_FAMILY } from '../core/platform';
+import { createCSSEmphasis } from './cssEmphasis';
+import { getElementSSRData } from '../zrender';
 
 const round = Math.round;
 
@@ -64,9 +66,27 @@ function setStyleAttrs(attrs: SVGVNodeAttrs, style: AllStyleOption, el: Path | T
         else {
             attrs[key] = val;
         }
+        if (isFillStroke && scope.ssr && val === 'none') {
+            // When is none, it cannot be interacted when ssr
+            // Setting `pointer-events` as `visible` to make it responding
+            // See also https://www.w3.org/TR/SVG/interact.html#PointerEventsProperty
+            attrs['pointer-events'] = 'visible';
+        }
     }, style, el, false);
 
     setShadow(el, attrs, scope);
+}
+
+function setMetaData(attrs: SVGVNodeAttrs, el: Path | TSpan | ZRImage) {
+    const metaData = getElementSSRData(el);
+    if (metaData) {
+        metaData.each((val, key) => {
+            val != null && (attrs[(META_DATA_PREFIX + key).toLowerCase()] = val + '');
+        });
+        if (el.isSilent()) {
+            attrs[META_DATA_PREFIX + 'silent'] = 'true';
+        }
+    }
 }
 
 function noRotateScale(m: MatrixArray) {
@@ -123,7 +143,7 @@ function createAttrsConvert(desc: ShapeMapDesc): ConvertShapeToAttr {
     };
 }
 
-const buitinShapesDef: Record<string, [ConvertShapeToAttr, ShapeValidator?]> = {
+const builtinShapesDef: Record<string, [ConvertShapeToAttr, ShapeValidator?]> = {
     circle: [createAttrsConvert(['cx', 'cy', 'r'])],
     polyline: [convertPolyShape, validatePolyShape],
     polygon: [convertPolyShape, validatePolyShape]
@@ -149,7 +169,7 @@ function hasShapeAnimation(el: Displayable) {
 export function brushSVGPath(el: Path, scope: BrushScope) {
     const style = el.style;
     const shape = el.shape;
-    const builtinShpDef = buitinShapesDef[el.type];
+    const builtinShpDef = builtinShapesDef[el.type];
     const attrs: SVGVNodeAttrs = {};
     const needsAnimate = scope.animation;
     let svgElType = 'path';
@@ -170,12 +190,13 @@ export function brushSVGPath(el: Path, scope: BrushScope) {
         builtinShpDef[0](shape, attrs, mul);
     }
     else {
+        const needBuildPath = !el.path || el.shapeChanged();
         if (!el.path) {
             el.createPathProxy();
         }
         const path = el.path;
 
-        if (el.shapeChanged()) {
+        if (needBuildPath) {
             path.beginPath();
             el.buildPath(path, el.shape);
             el.pathUpdated();
@@ -203,8 +224,10 @@ export function brushSVGPath(el: Path, scope: BrushScope) {
 
     setTransform(attrs, el.transform);
     setStyleAttrs(attrs, style, el, scope);
+    setMetaData(attrs, el);
 
     scope.animation && createCSSAnimation(el, attrs, scope);
+    scope.emphasis && createCSSEmphasis(el, attrs, scope);
 
     return createVNode(svgElType, el.id + '', attrs);
 }
@@ -247,6 +270,7 @@ export function brushSVGImage(el: ZRImage, scope: BrushScope) {
 
     setTransform(attrs, el.transform);
     setStyleAttrs(attrs, style, el, scope);
+    setMetaData(attrs, el);
 
     scope.animation && createCSSAnimation(el, attrs, scope);
 
@@ -266,8 +290,8 @@ export function brushSVGTSpan(el: TSpan, scope: BrushScope) {
     // style.font has been normalized by `normalizeTextStyle`.
     const font = style.font || DEFAULT_FONT;
 
-    // Consider different font display differently in vertial align, we always
-    // set vertialAlign as 'middle', and use 'y' to locate text vertically.
+    // Consider different font display differently in vertical align, we always
+    // set verticalAlign as 'middle', and use 'y' to locate text vertically.
     const x = style.x || 0;
     const y = adjustTextY(style.y || 0, getLineHeight(font), style.textBaseline);
     const textAlign = TEXT_ALIGN_TO_ANCHOR[style.textAlign as keyof typeof TEXT_ALIGN_TO_ANCHOR]
@@ -318,6 +342,7 @@ export function brushSVGTSpan(el: TSpan, scope: BrushScope) {
     }
     setTransform(attrs, el.transform);
     setStyleAttrs(attrs, style, el, scope);
+    setMetaData(attrs, el);
 
     scope.animation && createCSSAnimation(el, attrs, scope);
 
@@ -388,7 +413,7 @@ function setShadow(
     }
 }
 
-function setGradient(
+export function setGradient(
     style: PathStyleProps,
     attrs: SVGVNodeAttrs,
     target: 'fill' | 'stroke',
@@ -467,16 +492,19 @@ function setGradient(
     attrs[target] = getIdURL(gradientId);
 }
 
-function setPattern(
+export function setPattern(
     el: Displayable,
     attrs: SVGVNodeAttrs,
     target: 'fill' | 'stroke',
     scope: BrushScope
 ) {
     const val = el.style[target] as ImagePatternObject | SVGPatternObject;
-    const patternAttrs: SVGVNodeAttrs = {
-        'patternUnits': 'userSpaceOnUse'
-    };
+    const boundingRect = el.getBoundingRect();
+    const patternAttrs: SVGVNodeAttrs = {};
+    const repeat = (val as ImagePatternObject).repeat;
+    const noRepeat = repeat === 'no-repeat';
+    const repeatX = repeat === 'repeat-x';
+    const repeatY = repeat === 'repeat-y';
     let child: SVGVNode;
     if (isImagePattern(val)) {
         let imageWidth = val.imageWidth;
@@ -503,8 +531,20 @@ function setPattern(
             const setSizeToVNode = (vNode: SVGVNode, img: ImageLike) => {
                 if (vNode) {
                     const svgEl = vNode.elm as SVGElement;
-                    const width = (vNode.attrs.width = imageWidth || img.width);
-                    const height = (vNode.attrs.height = imageHeight || img.height);
+                    let width = imageWidth || img.width;
+                    let height = imageHeight || img.height;
+                    if (vNode.tag === 'pattern') {
+                        if (repeatX) {
+                            height = 1;
+                            width /= boundingRect.width;
+                        }
+                        else if (repeatY) {
+                            width = 1;
+                            height /= boundingRect.height;
+                        }
+                    }
+                    vNode.attrs.width = width;
+                    vNode.attrs.height = height;
                     if (svgEl) {
                         svgEl.setAttribute('width', width as any);
                         svgEl.setAttribute('height', height as any);
@@ -513,7 +553,7 @@ function setPattern(
             };
             const createdImage = createOrUpdateImage(
                 imageSrc, null, el, (img) => {
-                    setSizeToVNode(patternVNode, img);
+                    noRepeat || setSizeToVNode(patternVNode, img);
                     setSizeToVNode(child, img);
                 }
             );
@@ -546,7 +586,32 @@ function setPattern(
         return;
     }
 
-    patternAttrs.patternTransform = getSRTTransformString(val);
+    let patternWidth;
+    let patternHeight;
+    if (noRepeat) {
+        patternWidth = patternHeight = 1;
+    }
+    else if (repeatX) {
+        patternHeight = 1;
+        patternWidth = (patternAttrs.width as number) / boundingRect.width;
+    }
+    else if (repeatY) {
+        patternWidth = 1;
+        patternHeight = (patternAttrs.height as number) / boundingRect.height;
+    }
+    else {
+        patternAttrs.patternUnits = 'userSpaceOnUse';
+    }
+
+    if (patternWidth != null && !isNaN(patternWidth)) {
+        patternAttrs.width = patternWidth;
+    }
+    if (patternHeight != null && !isNaN(patternHeight)) {
+        patternAttrs.height = patternHeight;
+    }
+
+    const patternTransform = getSRTTransformString(val);
+    patternTransform && (patternAttrs.patternTransform = patternTransform);
 
     // Use the whole html as cache key.
     let patternVNode = createVNode(

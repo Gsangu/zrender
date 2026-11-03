@@ -1,6 +1,8 @@
 
 import env from './env';
 import {buildTransformer} from './fourPointsTransform';
+import {Dictionary} from './types';
+import { each } from './util';
 
 const EVENT_SAVED_PROP = '___zrEVENTSAVED';
 const _calcOut: number[] = [];
@@ -10,6 +12,7 @@ type SavedInfo = {
     trans?: ReturnType<typeof buildTransformer>
     invTrans?: ReturnType<typeof buildTransformer>
     srcCoords?: number[]
+    clearMarkers?: () => void
 }
 
 /**
@@ -54,6 +57,22 @@ export function transformLocalCoord(
 ) {
     return transformCoordWithViewport(_calcOut, elFrom, inX, inY, true)
         && transformCoordWithViewport(out, elTarget, _calcOut[0], _calcOut[1]);
+}
+
+export function transformLocalCoordClear(
+    elFrom: HTMLElement,
+    elTarget: HTMLElement,
+) {
+    elFrom && dealClear(elFrom);
+    elTarget && dealClear(elTarget);
+
+    function dealClear(el: HTMLElement) {
+        const saved: SavedInfo = (el as any)[EVENT_SAVED_PROP];
+        if (saved) {
+            saved.clearMarkers && saved.clearMarkers();
+            delete (el as any)[EVENT_SAVED_PROP];
+        }
+    }
 }
 
 /**
@@ -133,6 +152,12 @@ function prepareCoordMarkers(el: HTMLElement, saved: SavedInfo) {
         markers.push(marker);
     }
 
+    saved.clearMarkers = function () {
+        each(markers, function (marker) {
+            marker.parentNode && marker.parentNode.removeChild(marker);
+        });
+    };
+
     return markers;
 }
 
@@ -166,4 +191,21 @@ function preparePointerTransformer(markers: HTMLDivElement[], saved: SavedInfo, 
 
 export function isCanvasEl(el: HTMLElement): el is HTMLCanvasElement {
     return el.nodeName.toUpperCase() === 'CANVAS';
+}
+
+const replaceReg = /([&<>"'])/g;
+const replaceMap: Dictionary<string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    '\'': '&#39;'
+};
+
+export function encodeHTML(source: string): string {
+    return source == null
+        ? ''
+        : (source + '').replace(replaceReg, function (str, c) {
+            return replaceMap[c];
+        });
 }

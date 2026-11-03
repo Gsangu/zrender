@@ -1,10 +1,9 @@
-import Displayable, { DEFAULT_COMMON_STYLE } from '../graphic/Displayable';
+import Displayable, { BeforeBrushParam, DEFAULT_COMMON_STYLE } from '../graphic/Displayable';
 import PathProxy from '../core/PathProxy';
 import { GradientObject } from '../graphic/Gradient';
 import { ImagePatternObject, InnerImagePatternObject } from '../graphic/Pattern';
 import { LinearGradientObject } from '../graphic/LinearGradient';
 import { RadialGradientObject } from '../graphic/RadialGradient';
-import { ZRCanvasRenderingContext } from '../core/types';
 import { createOrUpdateImage, isImageReady } from '../graphic/helper/image';
 import { getCanvasGradient, isClipPathChanged } from './helper';
 import Path, { PathStyleProps } from '../graphic/Path';
@@ -16,6 +15,7 @@ import { getLineDash } from './dashStyle';
 import { REDRAW_BIT, SHAPE_CHANGED_BIT } from '../graphic/constants';
 import type IncrementalDisplayable from '../graphic/IncrementalDisplayable';
 import { DEFAULT_FONT } from '../core/platform';
+
 
 const pathProxyForDraw = new PathProxy(true);
 
@@ -88,7 +88,13 @@ export function createCanvasPattern(
 }
 
 // Draw Path Elements
-function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProps, inBatch: boolean) {
+function brushPath(
+    ctx: CanvasRenderingContext2D,
+    el: Path,
+    style: PathStyleProps,
+    canBatch: boolean,
+    scope: BrushScope
+) {
     let hasStroke = styleHasStroke(style);
     let hasFill = styleHasFill(style);
 
@@ -107,7 +113,7 @@ function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProp
     const path = el.path || pathProxyForDraw;
     const dirtyFlag = el.__dirty;
 
-    if (!inBatch) {
+    if (!canBatch) {
         const fill = style.fill;
         const stroke = style.stroke;
 
@@ -152,7 +158,7 @@ function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProp
             strokePattern = (dirtyFlag || !el.__canvasStrokePattern)
                 ? createCanvasPattern(ctx, stroke as ImagePatternObject, el)
                 : el.__canvasStrokePattern;
-            el.__canvasStrokePattern = fillPattern;
+            el.__canvasStrokePattern = strokePattern;
         }
         // Use the gradient or pattern
         if (hasFillGradient) {
@@ -184,7 +190,7 @@ function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProp
 
     // Update path sx, sy
     const scale = el.getGlobalScale();
-    path.setScale(scale[0], scale[1], el.segmentIgnoreThreshold);
+    path.setScale(scale[0], scale[1], el.segmentIgnoreThreshold, scope.dpr);
 
     let lineDash;
     let lineDashOffset;
@@ -195,7 +201,6 @@ function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProp
     let needsRebuild = true;
 
     if (firstDraw || (dirtyFlag & SHAPE_CHANGED_BIT)) {
-        path.setDPR((ctx as any).dpr);
         if (strokePart) {
             // Use rebuildPath for percent stroke, so no context.
             path.setContext(null);
@@ -206,7 +211,7 @@ function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProp
         }
         path.reset();
 
-        el.buildPath(path, el.shape, inBatch);
+        el.buildPath(path, el.shape, canBatch);
         path.toStatic();
 
         // Clear path dirty flag
@@ -223,7 +228,7 @@ function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProp
         ctx.lineDashOffset = lineDashOffset;
     }
 
-    if (!inBatch) {
+    if (!canBatch) {
         if (style.strokeFirst) {
             if (hasStroke) {
                 doStrokePath(ctx, style);
@@ -240,6 +245,11 @@ function brushPath(ctx: CanvasRenderingContext2D, el: Path, style: PathStyleProp
                 doStrokePath(ctx, style);
             }
         }
+    }
+    else {
+        // Note that flushPathDrawn has been executed if !canBatchPath .
+        scope.batchFill = hasFill;
+        scope.batchStroke = hasStroke;
     }
 
     if (lineDash) {
@@ -402,7 +412,7 @@ function bindCommonProps(
                 styleChanged = true;
             }
             // FIXME Invalid property value will cause style leak from previous element.
-            ctx[propName] = (ctx as ZRCanvasRenderingContext).dpr * (style[propName] || 0);
+            ctx[propName] = scope.dpr * (style[propName] || 0);
         }
     }
     if (forceSetAll || style.shadowColor !== prevStyle.shadowColor) {
@@ -422,10 +432,10 @@ function bindPathAndTextCommonStyle(
     forceSetAll: boolean,
     scope: BrushScope
 ) {
-    const style = getStyle(el, scope.inHover);
+    const style = el.style;
     const prevStyle = forceSetAll
         ? null
-        : (prevEl && getStyle(prevEl, scope.inHover) || {});
+        : (prevEl && prevEl.style || {});
     // Shared same style. prevStyle will be null if forceSetAll.
     if (style === prevStyle) {
         return false;
@@ -495,16 +505,16 @@ function bindImageStyle(
 ) {
     return bindCommonProps(
         ctx,
-        getStyle(el, scope.inHover),
-        prevEl && getStyle(prevEl, scope.inHover),
+        el.style,
+        prevEl && prevEl.style,
         forceSetAll,
         scope
     );
 }
 
-function setContextTransform(ctx: CanvasRenderingContext2D, el: Displayable) {
+function setContextTransform(ctx: CanvasRenderingContext2D, el: Displayable, scope: BrushScope) {
     const m = el.transform;
-    const dpr = (ctx as ZRCanvasRenderingContext).dpr || 1;
+    const dpr = scope.dpr;
     if (m) {
         ctx.setTransform(dpr * m[0], dpr * m[1], dpr * m[2], dpr * m[3], dpr * m[4], dpr * m[5]);
     }
@@ -520,7 +530,7 @@ function updateClipStatus(clipPaths: Path[], ctx: CanvasRenderingContext2D, scop
         // Ignore draw following elements if clipPath has zero area.
         allClipped = allClipped || clipPath.isZeroArea();
 
-        setContextTransform(ctx, clipPath);
+        setContextTransform(ctx, clipPath, scope);
         ctx.beginPath();
         clipPath.buildPath(ctx, clipPath.shape);
         ctx.clip();
@@ -556,16 +566,20 @@ export type BrushScope = {
     viewWidth: number
     viewHeight: number
 
+    dpr: number
+
     // Status for clipping
-    prevElClipPaths?: Path[]
+    prevElClipPaths?: Path[] // Only paths with length > 0 can be assigned.
     prevEl?: Displayable
     allClipped?: boolean    // If the whole element can be clipped
 
     // Status for batching
-    batchFill?: string
-    batchStroke?: string
+    batchFill?: boolean
+    batchStroke?: boolean
 
     lastDrawType?: number
+
+    beforeBrushParam: BeforeBrushParam
 }
 
 // If path can be batched
@@ -590,20 +604,22 @@ function canPathBatch(style: PathStyleProps) {
     );
 }
 
+// Should be idempotent - may be called more than necessary.
 function flushPathDrawn(ctx: CanvasRenderingContext2D, scope: BrushScope) {
-    // Force flush all after drawn last element
-    scope.batchFill && ctx.fill();
-    scope.batchStroke && ctx.stroke();
-    scope.batchFill = '';
-    scope.batchStroke = '';
+    if (scope.batchFill) {
+        scope.batchFill = false;
+        ctx.fill();
+    }
+    if (scope.batchStroke) {
+        scope.batchStroke = false;
+        ctx.stroke();
+    }
 }
 
-function getStyle(el: Displayable, inHover?: boolean) {
-    return inHover ? (el.__hoverStyle || el.style) : el.style;
-}
-
-export function brushSingle(ctx: CanvasRenderingContext2D, el: Displayable) {
-    brush(ctx, el, { inHover: false, viewWidth: 0, viewHeight: 0 }, true);
+export function brushSingle(ctx: CanvasRenderingContext2D, el: Displayable, dpr: number) {
+    const scope = { inHover: false, viewWidth: 0, viewHeight: 0, beforeBrushParam: {dpr}, dpr};
+    brush(ctx, el, scope);
+    brushLoopFinalize(ctx, scope);
 }
 
 // Brush different type of elements.
@@ -611,7 +627,6 @@ export function brush(
     ctx: CanvasRenderingContext2D,
     el: Displayable,
     scope: BrushScope,
-    isLast: boolean
 ) {
     const m = el.transform;
 
@@ -628,16 +643,16 @@ export function brush(
     // HANDLE CLIPPING
     const clipPaths = el.__clipPaths;
     const prevElClipPaths = scope.prevElClipPaths;
+    const style = el.style;
 
     let forceSetTransform = false;
     let forceSetStyle = false;
     // Optimize when clipping on group with several elements
     if (!prevElClipPaths || isClipPathChanged(clipPaths, prevElClipPaths)) {
         // If has previous clipping state, restore from it
-        if (prevElClipPaths && prevElClipPaths.length) {
+        if (prevElClipPaths) {
             // Flush restore
             flushPathDrawn(ctx, scope);
-
             ctx.restore();
             // Must set all style and transform because context changed by restore
             forceSetStyle = forceSetTransform = true;
@@ -651,13 +666,12 @@ export function brush(
         if (clipPaths && clipPaths.length) {
             // Flush before clip
             flushPathDrawn(ctx, scope);
-
             ctx.save();
             updateClipStatus(clipPaths, ctx, scope);
             // Must set transform because it's changed when clip.
             forceSetTransform = true;
+            scope.prevElClipPaths = clipPaths;
         }
-        scope.prevElClipPaths = clipPaths;
     }
 
     // Not rendering elements if it's clipped by a zero area path.
@@ -676,12 +690,17 @@ export function brush(
     //  ctx.fill();
     // )
     if (scope.allClipped) {
+        // Needs to mark el rendered.
+        // Or this element will always been rendered in progressive rendering.
+        // But other dirty bit should not be cleared, otherwise it cause the shape
+        // can not be updated in this case.
+        el.__dirty &= ~REDRAW_BIT;
         el.__isRendered = false;
         return;
     }
 
     // START BRUSH
-    el.beforeBrush && el.beforeBrush();
+    el.beforeBrush && el.beforeBrush(scope.beforeBrushParam);
     el.innerBeforeBrush();
 
     const prevEl = scope.prevEl;
@@ -692,19 +711,18 @@ export function brush(
 
     let canBatchPath = el instanceof Path   // Only path supports batch
         && el.autoBatch
-        && canPathBatch(el.style);
+        && canPathBatch(style);
 
     if (forceSetTransform || isTransformChanged(m, prevEl.transform)) {
         // Flush
         flushPathDrawn(ctx, scope);
-        setContextTransform(ctx, el);
+        setContextTransform(ctx, el, scope);
     }
     else if (!canBatchPath) {
         // Flush
         flushPathDrawn(ctx, scope);
     }
 
-    const style = getStyle(el, scope.inHover);
     if (el instanceof Path) {
         // PENDING do we need to rebind all style if displayable type changed?
         if (scope.lastDrawType !== DRAW_TYPE_PATH) {
@@ -714,15 +732,11 @@ export function brush(
 
         bindPathAndTextCommonStyle(ctx, el as Path, prevEl as Path, forceSetStyle, scope);
         // Begin path at start
+        // (can be skipped only if this el can be batched and there are previous batched rendering).
         if (!canBatchPath || (!scope.batchFill && !scope.batchStroke)) {
             ctx.beginPath();
         }
-        brushPath(ctx, el as Path, style, canBatchPath);
-
-        if (canBatchPath) {
-            scope.batchFill = style.fill as string || '';
-            scope.batchStroke = style.stroke as string || '';
-        }
+        brushPath(ctx, el as Path, style, canBatchPath, scope);
     }
     else {
         if (el instanceof TSpan) {
@@ -755,18 +769,41 @@ export function brush(
 
     }
 
-    if (canBatchPath && isLast) {
-        flushPathDrawn(ctx, scope);
-    }
-
     el.innerAfterBrush();
-    el.afterBrush && el.afterBrush();
+    if (el.afterBrush) {
+        if (canBatchPath) {
+            flushPathDrawn(ctx, scope);
+            // If !canBatch, flushPathDrawn has been executed before.
+            // el.afterBrush may call methods such as ctx.fillRect .
+        }
+        el.afterBrush();
+    }
 
     scope.prevEl = el;
 
     // Mark as painted.
     el.__dirty = 0;
     el.__isRendered = true;
+}
+
+/**
+ * Must be called after `brush()` iteration finished, regardless of whether
+ * reaching `layer.__endIndex`.
+ *
+ * NOTE: This method may be called with all `brush()` are skipped.
+ */
+export function brushLoopFinalize(
+    ctx: CanvasRenderingContext2D,
+    scope: BrushScope
+) {
+    flushPathDrawn(ctx, scope);
+    if (scope.prevElClipPaths) {
+        // Needs restore the state. If last drawn element is in the clipping area.
+        // NOTE: It should not be called before el.afterBrush, since el.afterBrush
+        // may call methods such as ctx.fillRect.
+        ctx.restore();
+        // No need to clear scope, since it should no longer be used.
+    }
 }
 
 function brushIncremental(
@@ -779,36 +816,42 @@ function brushIncremental(
     // Provide an inner scope.
     // Save current context and restore after brushed.
     ctx.save();
+    const dpr = scope.dpr;
     let innerScope: BrushScope = {
         prevElClipPaths: null,
         prevEl: null,
         allClipped: false,
         viewWidth: scope.viewWidth,
         viewHeight: scope.viewHeight,
-        inHover: scope.inHover
+        dpr,
+        inHover: scope.inHover,
+        beforeBrushParam: {dpr}
     };
     let i;
     let len;
     // Render persistant displayables.
     for (i = el.getCursor(), len = displayables.length; i < len; i++) {
         const displayable = displayables[i];
-        displayable.beforeBrush && displayable.beforeBrush();
+        displayable.beforeBrush && displayable.beforeBrush(scope.beforeBrushParam);
         displayable.innerBeforeBrush();
-        brush(ctx, displayable, innerScope, i === len - 1);
+        brush(ctx, displayable, innerScope);
         displayable.innerAfterBrush();
         displayable.afterBrush && displayable.afterBrush();
         innerScope.prevEl = displayable;
     }
+    brushLoopFinalize(ctx, innerScope);
     // Render temporary displayables.
     for (let i = 0, len = temporalDisplayables.length; i < len; i++) {
         const displayable = temporalDisplayables[i];
-        displayable.beforeBrush && displayable.beforeBrush();
+        displayable.beforeBrush && displayable.beforeBrush(scope.beforeBrushParam);
         displayable.innerBeforeBrush();
-        brush(ctx, displayable, innerScope, i === len - 1);
+        brush(ctx, displayable, innerScope);
         displayable.innerAfterBrush();
         displayable.afterBrush && displayable.afterBrush();
         innerScope.prevEl = displayable;
     }
+    brushLoopFinalize(ctx, innerScope);
+
     el.clearTemporalDisplayables();
     el.notClear = true;
 

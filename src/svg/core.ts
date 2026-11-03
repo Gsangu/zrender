@@ -1,4 +1,5 @@
 import { keys, map } from '../core/util';
+import { encodeHTML } from '../core/dom';
 
 export type CSSSelectorVNode = Record<string, string>
 export type CSSAnimationVNode = Record<string, Record<string, string>>
@@ -7,6 +8,7 @@ export const SVGNS = 'http://www.w3.org/2000/svg';
 export const XLINKNS = 'http://www.w3.org/1999/xlink';
 export const XMLNS = 'http://www.w3.org/2000/xmlns/';
 export const XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
+export const META_DATA_PREFIX = 'ecmeta_';
 
 export function createElement(name: string) {
     return document.createElementNS(SVGNS, name);
@@ -51,7 +53,7 @@ function createElementOpen(name: string, attrs?: SVGVNodeAttrs) {
                 continue;
             }
             else if (val !== true && val != null) {
-                part += `="${val}"`;
+                part += `="${encodeHTML(val + '')}"`;
             }
             attrsStr.push(part);
         }
@@ -63,21 +65,27 @@ function createElementClose(name: string) {
     return `</${name}>`;
 }
 
+/**
+ * CAVEAT: @see ZR_SVG_INJECTION_RISK for security risks.
+ */
 export function vNodeToString(el: SVGVNode, opts?: {
     newline?: boolean
 }) {
     opts = opts || {};
     const S = opts.newline ? '\n' : '';
     function convertElToString(el: SVGVNode): string {
-        const {children, tag, attrs} = el;
+        const {children, tag, attrs, text} = el;
         return createElementOpen(tag, attrs)
-            + (el.text || '')
+            + (tag !== 'style' ? encodeHTML(text) : text || '')
             + (children ? `${S}${map(children, child => convertElToString(child)).join(S)}${S}` : '')
             + createElementClose(tag);
     }
     return convertElToString(el);
 }
 
+/**
+ * CAVEAT: @see ZR_SVG_INJECTION_RISK for security risks.
+ */
 export function getCssString(
     selectorNodes: Record<string, CSSSelectorVNode>,
     animationNodes: Record<string, CSSAnimationVNode>,
@@ -127,8 +135,11 @@ export interface BrushScope {
 
     cssNodes: Record<string, CSSSelectorVNode>
     cssAnims: Record<string, Record<string, Record<string, string>>>
+    /**
+     * Cache for css style string, mapping from style string to class name.
+     */
+    cssStyleCache: Record<string, string>
 
-    cssClassIdx: number
     cssAnimIdx: number
 
     shadowIdx: number
@@ -140,6 +151,10 @@ export interface BrushScope {
      * If create animates nodes.
      */
     animation?: boolean,
+    /**
+     * If create emphasis styles.
+     */
+    emphasis?: boolean,
 
     /**
      * If will update. Some optimization for string generation can't be applied.
@@ -150,6 +165,8 @@ export interface BrushScope {
      * If compress the output string.
      */
     compress?: boolean
+
+    ssr?: boolean
 }
 
 export function createBrushScope(zrId: string): BrushScope {
@@ -163,8 +180,8 @@ export function createBrushScope(zrId: string): BrushScope {
 
         cssNodes: {},
         cssAnims: {},
+        cssStyleCache: {},
 
-        cssClassIdx: 0,
         cssAnimIdx: 0,
 
         shadowIdx: 0,

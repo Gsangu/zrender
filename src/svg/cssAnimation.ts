@@ -10,6 +10,7 @@ import Animator from '../animation/Animator';
 import CompoundPath from '../graphic/CompoundPath';
 import { AnimationEasing } from '../animation/easing';
 import { createCubicEasingFunc } from '../animation/cubicEasing';
+import { getClassId } from './cssClassId';
 
 export const EASING_MAP: Record<string, string> = {
     // From https://easings.net/
@@ -125,6 +126,11 @@ function createCompoundPathCSSAnimation(
     return cssAnimationCfg.replace(cssAnimationName, animationName);
 }
 
+/**
+ * CAVEAT: If user-provided easing functions were to be supported, users should
+ * be warned about the security risks.
+ * @see ZR_SVG_INJECTION_RISK .
+ */
 function getEasingFunc(easing: AnimationEasing) {
     return isString(easing)
         ? EASING_MAP[easing]
@@ -355,7 +361,7 @@ export function createCSSAnimation(
     }
 
     if (cssAnimations.length) {
-        const className = scope.zrId + '-cls-' + scope.cssClassIdx++;
+        const className = scope.zrId + '-cls-' + getClassId();
         scope.cssNodes['.' + className] = {
             animation: cssAnimations.join(',')
         };

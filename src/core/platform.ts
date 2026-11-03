@@ -11,6 +11,8 @@ interface Platform {
         onload: () => void | HTMLImageElement['onload'],
         onerror: () => void | HTMLImageElement['onerror']
     ): HTMLImageElement
+    // Testing friendly to control frames
+    getTime(): number
 }
 
 // Text width map used for environment there is no canvas
@@ -75,8 +77,8 @@ export const platformApi: Platform = {
                 text = text || '';
                 font = font || DEFAULT_FONT;
                 // Use font size if there is no other method can be used.
-                const res = /^([0-9]*?)px$/.exec(font);
-                const fontSize = +(res && res[1]) || DEFAULT_FONT_SIZE;
+                const res = /((?:\d+)?\.?\d*)px/.exec(font);
+                const fontSize = res && +res[1] || DEFAULT_FONT_SIZE;
                 let width = 0;
                 if (font.indexOf('mono') >= 0) {   // is monospace
                     width = fontSize * text.length;
@@ -98,13 +100,18 @@ export const platformApi: Platform = {
         image.onerror = onerror;
         image.src = src;
         return image;
+    },
+
+    getTime(): number {
+        // Indicatively, Date.now can be executed in 13,025,305 ops/second in a certain env.
+        return Date.now ? Date.now() : +(new Date());
     }
 };
 
 export function setPlatformAPI(newPlatformApis: Partial<Platform>) {
     for (let key in platformApi) {
-        // Don't assign unkown methods.
-        if ((newPlatformApis as any)[key]) {
+        // Don't assign unknown methods.
+        if (platformApi.hasOwnProperty(key) && (newPlatformApis as any)[key]) {
             (platformApi as any)[key] = (newPlatformApis as any)[key];
         }
     }

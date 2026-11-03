@@ -9,9 +9,9 @@
 
 import * as vec2 from './vector';
 import BoundingRect from './BoundingRect';
-import {devicePixelRatio as dpr} from '../config';
 import { fromLine, fromCubic, fromQuadratic, fromArc } from './bbox';
 import { cubicLength, cubicSubdivide, quadraticLength, quadraticSubdivide } from './curve';
+import { NullUndefined } from './types';
 
 const CMD = {
     M: 1,
@@ -33,10 +33,6 @@ const CMD = {
 //     R: 5,
 //     Z: 1
 // };
-
-interface ExtendedCanvasRenderingContext2D extends CanvasRenderingContext2D {
-    dpr?: number
-}
 
 const tmpOutX: number[] = [];
 const tmpOutY: number[] = [];
@@ -104,8 +100,6 @@ export function normalizeArcAngles(angles: number[], anticlockwise: boolean): vo
 
 export default class PathProxy {
 
-    dpr = 1
-
     data: number[] | Float32Array
 
     /**
@@ -129,7 +123,7 @@ export default class PathProxy {
     // Only update the pending pt when distance is larger.
     private _pendingPtDist: number;
 
-    private _ctx: ExtendedCanvasRenderingContext2D
+    private _ctx: CanvasRenderingContext2D
 
     private _xi = 0
     private _yi = 0
@@ -170,27 +164,20 @@ export default class PathProxy {
         return this._version;
     }
 
-    /**
-     * @readOnly
-     */
-    setScale(sx: number, sy: number, segmentIgnoreThreshold?: number) {
-        // Compat. Previously there is no segmentIgnoreThreshold.
+    setScale(sx: number, sy: number, segmentIgnoreThreshold: number | NullUndefined, dpr: number) {
         segmentIgnoreThreshold = segmentIgnoreThreshold || 0;
+        dpr = dpr || 1;
         if (segmentIgnoreThreshold > 0) {
             this._ux = mathAbs(segmentIgnoreThreshold / dpr / sx) || 0;
             this._uy = mathAbs(segmentIgnoreThreshold / dpr / sy) || 0;
         }
     }
 
-    setDPR(dpr: number) {
-        this.dpr = dpr;
-    }
-
-    setContext(ctx: ExtendedCanvasRenderingContext2D) {
+    setContext(ctx: CanvasRenderingContext2D) {
         this._ctx = ctx;
     }
 
-    getContext(): ExtendedCanvasRenderingContext2D {
+    getContext(): CanvasRenderingContext2D {
         return this._ctx;
     }
 
@@ -365,6 +352,9 @@ export default class PathProxy {
     }
 
     setData(data: Float32Array | number[]) {
+        if (!this._saveData) {
+            return;
+        }
 
         const len = data.length;
 
@@ -380,6 +370,9 @@ export default class PathProxy {
     }
 
     appendPath(path: PathProxy | PathProxy[]) {
+        if (!this._saveData) {
+            return;
+        }
         if (!(path instanceof Array)) {
             path = [path];
         }
@@ -389,8 +382,14 @@ export default class PathProxy {
         for (let i = 0; i < len; i++) {
             appendSize += path[i].len();
         }
-        if (hasTypedArray && (this.data instanceof Float32Array)) {
+        const oldData = this.data;
+        if (hasTypedArray && (oldData instanceof Float32Array || !oldData)) {
             this.data = new Float32Array(offset + appendSize);
+            if (offset > 0 && oldData) {
+                for (let k = 0; k < offset; k++) {
+                    this.data[k] = oldData[k];
+                }
+            }
         }
         for (let i = 0; i < len; i++) {
             const appendPathData = path[i].data;
@@ -675,8 +674,6 @@ export default class PathProxy {
                     const endAngle = delta + startAngle;
                     // TODO Arc 旋转
                     i += 1;
-                    const anticlockwise = !data[i++];
-
                     if (isFirst) {
                         // 直接使用 arc 命令
                         // 第一个命令起点还未定义
@@ -970,6 +967,10 @@ export default class PathProxy {
             : Array.prototype.slice.call(data);
         newProxy._len = this._len;
         return newProxy;
+    }
+
+    canSave(): boolean {
+        return !!this._saveData;
     }
 
     private static initDefaultProps = (function () {

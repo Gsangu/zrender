@@ -11,6 +11,15 @@ export type ArrayLike<T> = {
     length: number
 }
 
+/**
+ * NOTICE: For historical reason, zrender have not enabled TS config
+ * `strictNullChecks` yet. Therefore, a explicitly declared `NullUndefined` can
+ * indicate a variable can be `null` or `undefined` without more investigation,
+ * but a variable without `NullUndefined` may also be `null` or `undefined`,
+ * which has to be determined by the implementation.
+ */
+export type NullUndefined = null | undefined;
+
 export type ImageLike = HTMLImageElement | HTMLCanvasElement | HTMLVideoElement
 
 // subset of CanvasTextBaseline
@@ -34,7 +43,6 @@ export type WXCanvasRenderingContext = CanvasRenderingContext2D & {
 };
 
 export type ZRCanvasRenderingContext = CanvasRenderingContext2D & {
-    dpr: number
     __attrCachedBy: boolean | number
 }
 
@@ -96,3 +104,50 @@ export type KeyOfDistributive<T> = T extends unknown ? keyof T : never;
 
 export type WithThisType<Func extends (...args: any) => any, This> =
     (this: This, ...args: Parameters<Func>) => ReturnType<Func>;
+
+
+/**
+ * - `0` means incremental rendering is disabled.
+ * - A positive integer enables increamental rendering,
+ *  And distinguish different runs of consecutive incremental elements.
+ * - `1` is preserved from backward compatibility - truthy value will be converted
+ *   to `1`.
+ *
+ * @see DISPLAY_LIST_SORTING_AND_LAYERING for more details.
+ */
+export type IncrementalId = number;
+// Previously `el.incremental` is boolean. This is only used
+// for both TS type and value backward compatibility.
+// Internal conversion: true => 1, false => 0.
+export type IncrementalIdCompat = number | boolean;
+export const INCREMENTAL_ID_FALSE = 0;
+export const INCREMENTAL_ID_TRUE_COMPAT = 1;
+
+
+export type ZLevel = number;
+// zlevel2 can not be specified by users. It is assigned internally
+// and always be 0, 1, 2; never be greater than 2.
+export type ZLevel2 =
+    typeof ZLEVEL2_NORMAL_ABOVE
+    | typeof ZLEVEL2_INCREMENTAL
+    | typeof ZLEVEL2_NORMAL_BELOW
+
+export const ZLEVEL2_NORMAL_ABOVE = 2;
+export const ZLEVEL2_INCREMENTAL = 1;
+export const ZLEVEL2_NORMAL_BELOW = 0;
+
+export interface DOMSizeOpts {
+    // Can be 10 / '10px' / 'auto'
+    width?: number | string | NullUndefined
+    height?: number | string | NullUndefined
+};
+export interface DevicePixelRatioOpts {
+    devicePixelRatio?: number | NullUndefined
+};
+export interface DirtyRectOpts {
+    useDirtyRect?: boolean | NullUndefined
+}
+
+export const XY = ['x', 'y'] as const;
+export const WH = ['width', 'height'] as const;
+

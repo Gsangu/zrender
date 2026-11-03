@@ -1,5 +1,5 @@
 /* global: defineProperty */
-import { Dictionary, ArrayLike, KeyOfDistributive } from './types';
+import { Dictionary, ArrayLike, KeyOfDistributive, NullUndefined } from './types';
 import { GradientObject } from '../graphic/Gradient';
 import { ImagePatternObject } from '../graphic/Pattern';
 import { platformApi } from './platform';
@@ -50,10 +50,15 @@ const protoKey = '__proto__';
 
 let idStart = 0x0907;
 
+const MAX_SAFE_INTEGER = Math.pow(2, 53) - 1;
+
 /**
  * Generate unique id
  */
 export function guid(): number {
+    if (idStart >= MAX_SAFE_INTEGER) {
+        idStart = 0;
+    }
     return idStart++;
 }
 
@@ -65,7 +70,7 @@ export function logError(...args: any[]) {
 /**
  * Those data types can be cloned:
  *     Plain object, Array, TypedArray, number, string, null, undefined.
- * Those data types will be assgined using the orginal data:
+ * Those data types will be assigned using the original data:
  *     BUILTIN_OBJECT
  * Instance of user defined class will be cloned to a plain object, without
  * properties in prototype.
@@ -198,12 +203,42 @@ export function extend<
     return target as T & S;
 }
 
+export function assignProps<
+    TSrc extends Dictionary<any>,
+    TCommonKey extends keyof TSrc
+>(
+    tar: NullUndefined,
+    src: TSrc,
+    props: readonly TCommonKey[]
+): Pick<TSrc, TCommonKey>;
+export function assignProps<
+    TTar extends Dictionary<any>,
+    TSrc extends Dictionary<any>,
+    TCommonKey extends keyof TSrc & keyof TTar
+>(
+    tar: TTar,
+    src: TSrc & { [P in TCommonKey]: TTar[P] },
+    props: readonly TCommonKey[]
+): TTar;
+export function assignProps(
+    tar: any,
+    src: any,
+    props: readonly string[]
+) {
+    tar = (tar || {});
+    for (let idx = 0; idx < props.length; idx++) {
+        const prop = props[idx];
+        tar[prop] = src[prop];
+    }
+    return tar;
+}
+
 export function defaults<
     T extends Dictionary<any>,
     S extends Dictionary<any>
 >(target: T, source: S, overlay?: boolean): T & S {
     const keysArr = keys(source);
-    for (let i = 0; i < keysArr.length; i++) {
+    for (let i = 0, len = keysArr.length; i < len; i++) {
         let key = keysArr[i];
         if ((overlay ? source[key] != null : (target as T & S)[key] == null)) {
             (target as S & T)[key] = (source as T & S)[key];
@@ -626,8 +661,8 @@ export function assert(condition: any, message?: string) {
 }
 
 /**
- * @param str string to be trimed
- * @return trimed string
+ * @param str string to be trimmed
+ * @return trimmed string
  */
 export function trim(str: string): string {
     if (str == null) {
@@ -653,20 +688,72 @@ export function isPrimitive(obj: any): boolean {
     return obj[primitiveKey];
 }
 
+interface MapInterface<T, KEY extends string | number = string | number> {
+    delete(key: KEY): boolean;
+    has(key: KEY): boolean;
+    get(key: KEY): T | undefined;
+    set(key: KEY, value: T): this;
+    keys(): KEY[];
+    forEach(callback: (value: T, key: KEY) => void): void;
+}
+
+class MapPolyfill<T, KEY extends string | number = string | number> implements MapInterface<T, KEY> {
+    private data: Record<KEY, T> = {} as Record<KEY, T>;
+
+    delete(key: KEY): boolean {
+        const existed = this.has(key);
+        if (existed) {
+            delete this.data[key];
+        }
+        return existed;
+    }
+    has(key: KEY): boolean {
+        return this.data.hasOwnProperty(key);
+    }
+    get(key: KEY): T | undefined {
+        return this.data[key];
+    }
+    set(key: KEY, value: T): this {
+        this.data[key] = value;
+        return this;
+    }
+    keys(): KEY[] {
+        return keys(this.data);
+    }
+    forEach(callback: (value: T, key: KEY) => void): void {
+        // This is a potential performance bottleneck, see details in
+        // https://github.com/ecomfe/zrender/issues/965, however it is now
+        // less likely to occur as we default to native maps when possible.
+        const data = this.data;
+        for (const key in data) {
+            if (data.hasOwnProperty(key)) {
+                callback(data[key], key);
+            }
+        }
+    }
+}
+
+// We want to use native Map if it is available, but we do not want to polyfill the global scope
+// in case users ship their own polyfills or patch the native map object in any way.
+const isNativeMapSupported = typeof Map === 'function';
+function maybeNativeMap<T, KEY extends string | number = string | number>(): MapInterface<T, KEY> {
+    // Map may be a native class if we are running in an ES6 compatible environment.
+    // eslint-disable-next-line
+    return (isNativeMapSupported ? new Map<KEY, T>() : new MapPolyfill<T, KEY>()) as MapInterface<T, KEY>;
+}
 
 /**
  * @constructor
- * @param {Object} obj Only apply `ownProperty`.
+ * @param {Object} obj
  */
 export class HashMap<T, KEY extends string | number = string | number> {
-
-    data: {[key in KEY]: T} = {} as {[key in KEY]: T};
+    data: MapInterface<T, KEY>
 
     constructor(obj?: HashMap<T, KEY> | { [key in KEY]?: T } | KEY[]) {
         const isArr = isArray(obj);
         // Key should not be set on this, otherwise
-        // methods get/set/... may be overrided.
-        this.data = {} as {[key in KEY]: T};
+        // methods get/set/... may be overridden.
+        this.data = maybeNativeMap<T, KEY>();
         const thisMap = this;
 
         (obj instanceof HashMap)
@@ -678,16 +765,18 @@ export class HashMap<T, KEY extends string | number = string | number> {
         }
     }
 
-    // Do not provide `has` method to avoid defining what is `has`.
-    // (We usually treat `null` and `undefined` as the same, different
-    // from ES6 Map).
+    // `hasKey` instead of `has` for potential misleading.
+    hasKey(key: KEY): boolean {
+        return this.data.has(key);
+    }
     get(key: KEY): T {
-        return this.data.hasOwnProperty(key) ? this.data[key] : null;
+        return this.data.get(key);
     }
     set(key: KEY, value: T): T {
         // Comparing with invocation chaining, `return value` is more commonly
         // used in this case: `const someVal = map.set('a', genVal());`
-        return (this.data[key] = value);
+        this.data.set(key, value);
+        return value;
     }
     // Although util.each can be performed on this hashMap directly, user
     // should not use the exposed keys, who are prefixed.
@@ -695,18 +784,20 @@ export class HashMap<T, KEY extends string | number = string | number> {
         cb: (this: Context, value?: T, key?: KEY) => void,
         context?: Context
     ) {
-        for (let key in this.data) {
-            if (this.data.hasOwnProperty(key)) {
-                cb.call(context, this.data[key], key);
-            }
-        }
+        this.data.forEach((value, key) => {
+            cb.call(context, value, key);
+        });
     }
     keys(): KEY[] {
-        return keys(this.data);
+        const keys = this.data.keys();
+        return isNativeMapSupported
+            // Native map returns an iterator so we need to convert it to an array
+            ? Array.from(keys)
+            : keys;
     }
     // Do not use this method if performance sensitive.
-    removeKey(key: KEY) {
-        delete this.data[key];
+    removeKey(key: KEY): void {
+        this.data.delete(key);
     }
 }
 
@@ -764,3 +855,5 @@ export function hasOwn(own: object, prop: string): boolean {
 export function noop() {}
 
 export const RADIAN_TO_DEGREE = 180 / Math.PI;
+
+export const EPSILON = Number.EPSILON || Math.pow(2, -52);
